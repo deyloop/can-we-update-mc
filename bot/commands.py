@@ -1,26 +1,32 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import discord
 
-from bot.modrinth import ModInfo, ModrinthClient, ParsedModEntry
+from bot.modrinth import (
+    COMPATIBLE_COLOR,
+    INCOMPATIBLE_COLOR,
+    MAX_VERSIONS_SHOWN,
+    PARTIAL_COLOR,
+    ModInfo,
+    ModrinthClient,
+    ParsedModEntry,
+)
 
 if TYPE_CHECKING:
     from bot.config import Config
     from bot.modrinth import CompatibilityResult
 
 
-COMPATIBLE_COLOR = 0x00FF00
-INCOMPATIBLE_COLOR = 0xFF0000
-PARTIAL_COLOR = 0xFFAA00
-MAX_MC_VERSIONS_SHOWN = 5
-
 _config: Config | None = None
+
+VERSION_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
 
 
 def set_config(config: Config) -> None:
-    global _config  # noqa: PLW0603
+    global _config
     _config = config
 
 
@@ -29,6 +35,20 @@ def get_config() -> Config:
         msg = "Config not set"
         raise RuntimeError(msg)
     return _config
+
+
+def validate_minecraft_version(version: str) -> tuple[bool, str | None]:
+    if not version or not VERSION_PATTERN.match(version):
+        return False, f"Invalid Minecraft version format: '{version}'. Expected format: X.Y.Z"
+    return True, None
+
+
+def _format_version_list(versions: list[str], max_shown: int = MAX_VERSIONS_SHOWN) -> str:
+    displayed = ", ".join(versions[:max_shown])
+    remaining = len(versions) - max_shown
+    if remaining > 0:
+        displayed += f" (+{remaining} more)"
+    return displayed
 
 
 def _find_suggested_version(mod: ModInfo, minecraft_version: str) -> str:
@@ -41,9 +61,7 @@ def _find_suggested_version(mod: ModInfo, minecraft_version: str) -> str:
 
     latest = mod.all_versions[0] if mod.all_versions else None
     if latest:
-        supported = ", ".join(latest.game_versions[:MAX_MC_VERSIONS_SHOWN])
-        if len(latest.game_versions) > MAX_MC_VERSIONS_SHOWN:
-            supported += "..."
+        supported = _format_version_list(latest.game_versions)
         return f" | Latest: `{latest.version_number}` (supports {supported})"
     return ""
 
@@ -51,10 +69,7 @@ def _find_suggested_version(mod: ModInfo, minecraft_version: str) -> str:
 def _format_hash_mod(mod: ModInfo, minecraft_version: str) -> str | None:
     if not mod.hash_version:
         return None
-    mc_versions = ", ".join(mod.hash_version.game_versions[:MAX_MC_VERSIONS_SHOWN])
-    remaining = len(mod.hash_version.game_versions) - MAX_MC_VERSIONS_SHOWN
-    if remaining > 0:
-        mc_versions += f" (+{remaining} more)"
+    mc_versions = _format_version_list(mod.hash_version.game_versions)
     compat_note = (
         "📌 Pinned version is compatible"
         if mod.compatible
@@ -71,6 +86,40 @@ def _get_channel_suffix(mod: ModInfo) -> str:
     if mod.specified_channel:
         return f":{mod.specified_channel}"
     return ""
+
+
+def _format_mod_list(
+    mods: list[ModInfo],
+    prefix: str,
+    max_length: int = 1024,
+) -> str | None:
+    if not mods:
+        return None
+    text_parts = []
+    for mod in mods:
+        version_str = f" (`{mod.latest_version_str}`)" if mod.latest_version_str else ""
+        note = f"\n   └─ {mod.error}" if mod.error else ""
+        text_parts.append(f"{prefix} **{mod.slug}{_get_channel_suffix(mod)}**{version_str}{note}")
+    return "\n".join(text_parts)[:max_length]
+
+
+def _build_summary(
+    result: CompatibilityResult,
+    regular_mods_count: int,
+) -> str:
+    hash_mods = [m for m in result.mods if m.specified_hash]
+    hash_slugs = {m.slug for m in hash_mods}
+    compatible = [m for m in result.compatible_mods if m.slug not in hash_slugs]
+    incompatible = [m for m in result.incompatible_mods if m.slug not in hash_slugs]
+
+    all_compatible_excluding_hash = len(incompatible) == 0
+
+    if all_compatible_excluding_hash:
+        return f"✅ All {len(compatible)} mods are ready for Minecraft {result.minecraft_version}!"
+    return (
+        f"⚠️ {len(incompatible)} of {regular_mods_count} mods are NOT ready for "
+        f"Minecraft {result.minecraft_version}"
+    )
 
 
 def format_result(result: CompatibilityResult) -> discord.Embed:
@@ -111,42 +160,24 @@ def format_result(result: CompatibilityResult) -> discord.Embed:
             inline=False,
         )
 
-    if compatible:
-        compatible_text_parts = []
-        for mod in compatible:
-            version_str = f" (`{mod.latest_version_str}`)" if mod.latest_version_str else ""
-            note = f"\n   └─ {mod.error}" if mod.error else ""
-            compatible_text_parts.append(
-                f"✅ **{mod.slug}{_get_channel_suffix(mod)}**{version_str}{note}"
-            )
-        compatible_text = "\n".join(compatible_text_parts)
+    compatible_text = _format_mod_list(compatible, "✅")
+    if compatible_text:
         embed.add_field(
             name=f"Compatible ({len(compatible)})",
-            value=compatible_text[:1024],
+            value=compatible_text,
             inline=False,
         )
 
-    if incompatible:
-        incompatible_text_parts = [
-            f"❌ **{mod.slug}{_get_channel_suffix(mod)}**\n   └─ {mod.error or 'Not compatible'}"
-            for mod in incompatible
-        ]
-        incompatible_text = "\n\n".join(incompatible_text_parts)
+    incompatible_text = _format_mod_list(incompatible, "❌")
+    if incompatible_text:
         embed.add_field(
             name=f"Not Compatible ({len(incompatible)})",
-            value=incompatible_text[:1024],
+            value=incompatible_text,
             inline=False,
         )
 
     regular_mods_count = len(result.mods) - len(hash_mods)
-    summary = (
-        f"✅ All {len(compatible)} mods are ready for Minecraft {result.minecraft_version}!"
-        if all_compatible_excluding_hash
-        else (
-            f"⚠️ {len(incompatible)} of {regular_mods_count} mods are NOT ready for "
-            f"Minecraft {result.minecraft_version}"
-        )
-    )
+    summary = _build_summary(result, regular_mods_count)
     embed.add_field(name="Summary", value=summary, inline=False)
 
     embed.set_footer(text="Powered by Modrinth API")
@@ -163,6 +194,11 @@ def setup(bot: discord.Bot, config: Config) -> None:
     async def check(ctx: discord.ApplicationContext, version: str) -> None:
         await ctx.response.defer()
 
+        is_valid, error = validate_minecraft_version(version)
+        if not is_valid:
+            await ctx.followup.send(error, ephemeral=True)
+            return
+
         cfg = get_config()
         mods = cfg.load_mods_list()
         if not mods:
@@ -174,9 +210,9 @@ def setup(bot: discord.Bot, config: Config) -> None:
 
         loader = cfg.mods.loader
 
-        with ModrinthClient() as client:
+        async with ModrinthClient() as client:
             try:
-                result = client.check_mods_compatibility(mods, version, loader)
+                result = await client.check_mods_compatibility(mods, version, loader)
             except Exception as e:
                 await ctx.followup.send(
                     f"Error checking mods: {e}",
@@ -217,9 +253,9 @@ def setup(bot: discord.Bot, config: Config) -> None:
 
         loader = cfg.mods.loader
 
-        with ModrinthClient() as client:
+        async with ModrinthClient() as client:
             try:
-                latest_version = client.get_latest_minecraft_version()
+                latest_version = await client.get_latest_minecraft_version()
                 if not latest_version:
                     await ctx.followup.send(
                         "Could not determine latest Minecraft version.",
@@ -227,7 +263,7 @@ def setup(bot: discord.Bot, config: Config) -> None:
                     )
                     return
 
-                result = client.check_mods_compatibility(mods, latest_version, loader)
+                result = await client.check_mods_compatibility(mods, latest_version, loader)
             except Exception as e:
                 await ctx.followup.send(
                     f"Error checking mods: {e}",

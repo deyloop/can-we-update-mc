@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import time
+from asyncio import Semaphore
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 import httpx
 
@@ -12,9 +14,18 @@ MODRINTH_API_BASE = "https://api.modrinth.com/v2"
 VALID_LOADERS = {"fabric", "forge", "quilt", "neoforge", "paper", "bukkit", "spigot"}
 VALID_PREFIXES = VALID_LOADERS | {"datapack"}
 VALID_RELEASE_TYPES = {"release", "beta", "alpha"}
-MAX_SUPPORTED_VERSIONS_SHOWN = 5
 HTTP_NOT_FOUND = 404
 MOD_ENTRY_MAX_PARTS = 3
+
+MAX_VERSIONS_SHOWN = 5
+MAX_RETRIES = 3
+RATE_LIMIT_PER_MINUTE = 50
+RATE_LIMIT_WINDOW_SECONDS = 60
+CACHE_TTL_SECONDS = 300
+
+COMPATIBLE_COLOR = 0x00FF00
+INCOMPATIBLE_COLOR = 0xFF0000
+PARTIAL_COLOR = 0xFFAA00
 
 
 @dataclass
@@ -58,7 +69,6 @@ class ModVersion:
     version_type: Literal["release", "beta", "alpha"]
     loaders: list[str]
     date_published: str
-    files: list[dict] | None = None
     version_id: str | None = None
 
     @classmethod
@@ -70,7 +80,6 @@ class ModVersion:
             version_type=data["version_type"],
             loaders=data["loaders"],
             date_published=data["date_published"],
-            files=data.get("files"),
             version_id=data.get("id"),
         )
 
@@ -96,6 +105,27 @@ class ModInfo:
 
 
 @dataclass
+class ProjectInfo:
+    slug: str
+    title: str
+    description: str | None
+    categories: list[str]
+    client_side: str | None
+    server_side: str | None
+
+    @classmethod
+    def from_json(cls, data: dict) -> ProjectInfo:
+        return cls(
+            slug=data.get("slug", ""),
+            title=data.get("title", ""),
+            description=data.get("description"),
+            categories=data.get("categories", []),
+            client_side=data.get("client_side"),
+            server_side=data.get("server_side"),
+        )
+
+
+@dataclass
 class CompatibilityResult:
     minecraft_version: str
     loader: str
@@ -114,9 +144,39 @@ class CompatibilityResult:
         return [mod for mod in self.mods if not mod.compatible]
 
 
+@dataclass
+class CachedVersionList:
+    versions: list[ModVersion]
+    cached_at: float
+
+
+class RateLimiter:
+    def __init__(self, max_per_minute: int) -> None:
+        self.max_per_minute = max_per_minute
+        self.semaphore = Semaphore(max_per_minute)
+        self.tokens: list[float] = []
+
+    async def acquire(self) -> None:
+        now = time.monotonic()
+        self.tokens = [t for t in self.tokens if now - t < RATE_LIMIT_WINDOW_SECONDS]
+
+        if len(self.tokens) >= self.max_per_minute:
+            wait_time = 60 - (now - self.tokens[0])
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+                self.tokens = []
+
+        await self.semaphore.acquire()
+        self.tokens.append(time.monotonic())
+
+
 class ModrinthClient:
-    def __init__(self, timeout: float = 30.0, max_retries: int = 3) -> None:
-        self._client = httpx.Client(
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        max_retries: int = MAX_RETRIES,
+    ) -> None:
+        self._client = httpx.AsyncClient(
             base_url=MODRINTH_API_BASE,
             timeout=timeout,
             headers={
@@ -124,50 +184,57 @@ class ModrinthClient:
             },
         )
         self._max_retries = max_retries
-        self._version_cache: dict[str, list[ModVersion]] = {}
+        self._version_cache: dict[str, CachedVersionList] = {}
+        self._rate_limiter = RateLimiter(RATE_LIMIT_PER_MINUTE)
 
-    def close(self) -> None:
-        self._client.close()
+    async def close(self) -> None:
+        await self._client.aclose()
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
-    def _get_with_retry(self, path: str, **kwargs: object) -> dict | list:
+    def _is_cache_valid(self, cached: CachedVersionList) -> bool:
+        return time.monotonic() - cached.cached_at < CACHE_TTL_SECONDS
+
+    async def _get_with_retry(self, path: str, **kwargs: object) -> dict | list:
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
-                response = self._client.get(path, **kwargs)
+                await self._rate_limiter.acquire()
+                response = await self._client.get(path, **kwargs)
                 response.raise_for_status()
                 return response.json()
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 last_error = e
                 if attempt < self._max_retries - 1:
-                    time.sleep(2**attempt)
+                    await asyncio.sleep(2**attempt)
         if last_error:
             raise last_error
         msg = "Unexpected error in _get_with_retry"
         raise RuntimeError(msg)
 
-    def get_project_versions(
+    async def get_project_versions(
         self,
         project_id: str,
         game_versions: list[str] | None = None,
         loaders: list[str] | None = None,
         version_type: str | None = None,
     ) -> list[ModVersion]:
-        if project_id not in self._version_cache:
-            data = self._get_with_retry(
+        cached = self._version_cache.get(project_id)
+        if cached and self._is_cache_valid(cached):
+            all_versions = cached.versions
+        else:
+            data = await self._get_with_retry(
                 f"/project/{project_id}/version", params={"include_changelog": "false"}
             )
-            if isinstance(data, list):
-                self._version_cache[project_id] = [ModVersion.from_json(v) for v in data]
-            else:
-                self._version_cache[project_id] = []
+            all_versions = [ModVersion.from_json(v) for v in data] if isinstance(data, list) else []
+            self._version_cache[project_id] = CachedVersionList(
+                versions=all_versions, cached_at=time.monotonic()
+            )
 
-        all_versions = self._version_cache[project_id]
         versions = list(all_versions)
 
         if game_versions:
@@ -182,33 +249,23 @@ class ModrinthClient:
     def clear_cache(self) -> None:
         self._version_cache.clear()
 
-    def find_version_by_id(self, project_id: str, id_or_hash: str) -> ModVersion | None:
-        if project_id not in self._version_cache:
-            data = self._get_with_retry(
-                f"/project/{project_id}/version", params={"include_changelog": "false"}
-            )
-            if isinstance(data, list):
-                self._version_cache[project_id] = [ModVersion.from_json(v) for v in data]
-            else:
-                self._version_cache[project_id] = []
-
-        all_versions = self._version_cache.get(project_id, [])
+    async def find_version_by_id(self, project_id: str, id_or_hash: str) -> ModVersion | None:
+        versions = await self.get_project_versions(project_id)
         search_lower = id_or_hash.lower()
 
-        for version in all_versions:
+        for version in versions:
             if version.version_id and version.version_id.lower() == search_lower:
                 return version
 
-        for version in all_versions:
-            if version.files:
-                for f in version.files:
-                    sha1 = f.get("hashes", {}).get("sha1", "").lower()
-                    if sha1.startswith(search_lower):
-                        return version
+        for version in versions:
+            for f in version.files or []:
+                sha1 = f.get("hashes", {}).get("sha1", "").lower()
+                if sha1.startswith(search_lower):
+                    return version
 
         return None
 
-    def _check_hash_version(
+    async def _check_hash_version(
         self,
         parsed: ParsedModEntry,
         minecraft_version: str,
@@ -218,7 +275,7 @@ class ModrinthClient:
             msg = "version_spec should not be None when is_hash_specified is True"
             raise ValueError(msg)
 
-        version = self.find_version_by_id(parsed.project, hash_spec)
+        version = await self.find_version_by_id(parsed.project, hash_spec)
 
         if version is None:
             return ModInfo(
@@ -232,7 +289,7 @@ class ModrinthClient:
                 specified_hash=hash_spec,
             )
 
-        all_project_versions = self.get_project_versions(parsed.project)
+        all_project_versions = await self.get_project_versions(parsed.project)
 
         supported_mc_versions = version.game_versions
         compatible = minecraft_version in supported_mc_versions
@@ -263,8 +320,8 @@ class ModrinthClient:
             specified_hash=hash_spec,
         )
 
-    def search_project(self, query: str) -> dict | None:
-        data = self._get_with_retry(
+    async def search_project(self, query: str) -> dict | None:
+        data = await self._get_with_retry(
             "/search",
             params={"query": query, "limit": 5},
         )
@@ -282,17 +339,21 @@ class ModrinthClient:
                 return first_hit
         return None
 
-    def get_project_info(self, project_id: str) -> Any:
-        return self._get_with_retry(f"/project/{project_id}")
+    async def get_project_info(self, project_id: str) -> ProjectInfo:
+        data = await self._get_with_retry(f"/project/{project_id}")
+        if isinstance(data, dict):
+            return ProjectInfo.from_json(data)
+        msg = f"Unexpected response type: {type(data)}"
+        raise TypeError(msg)
 
-    def get_game_versions(self) -> list[dict]:
-        data = self._get_with_retry("/tag/game_version")
+    async def get_game_versions(self) -> list[dict]:
+        data = await self._get_with_retry("/tag/game_version")
         if not isinstance(data, list):
             return []
         return data
 
-    def get_latest_minecraft_version(self) -> str | None:
-        versions = self.get_game_versions()
+    async def get_latest_minecraft_version(self) -> str | None:
+        versions = await self.get_game_versions()
         stable_versions = [
             v["version"]
             for v in versions
@@ -328,7 +389,7 @@ class ModrinthClient:
             )
         return f"No {requested_channel} version for Minecraft {minecraft_version}{loader_text}."
 
-    def check_mod_compatibility(
+    async def check_mod_compatibility(
         self,
         project: str,
         minecraft_version: str,
@@ -337,29 +398,22 @@ class ModrinthClient:
         parsed = ParsedModEntry.parse(project)
 
         if parsed.is_hash_specified():
-            return self._check_hash_version(parsed, minecraft_version)
+            return await self._check_hash_version(parsed, minecraft_version)
 
         is_datapack = parsed.prefix == "datapack"
         effective_loader = parsed.effective_loader(loader)
-        effective_loaders = [] if is_datapack else [effective_loader]
+        effective_loaders: list[str] = [] if is_datapack else [effective_loader]
         specified_channel = parsed.effective_channel()
         requested_channel = specified_channel or "release"
 
         loader_text = f" with {effective_loader}" if effective_loaders else ""
 
         try:
-            available_channels: dict[str, list[ModVersion]] = {}
-            for channel in VALID_RELEASE_TYPES:
-                channel_versions = self.get_project_versions(
-                    parsed.project,
-                    game_versions=[minecraft_version],
-                    loaders=effective_loaders if effective_loaders else None,
-                    version_type=channel,
-                )
-                if channel_versions:
-                    available_channels[channel] = channel_versions
+            available_channels = await self._get_available_versions(
+                parsed.project, minecraft_version, effective_loaders
+            )
 
-            all_versions = self.get_project_versions(
+            all_versions = await self.get_project_versions(
                 parsed.project,
                 loaders=effective_loaders if effective_loaders else None,
             )
@@ -446,7 +500,25 @@ class ModrinthClient:
                 specified_channel=specified_channel,
             )
 
-    def check_mods_compatibility(
+    async def _get_available_versions(
+        self,
+        project_id: str,
+        minecraft_version: str,
+        loaders: list[str],
+    ) -> dict[str, list[ModVersion]]:
+        available_channels: dict[str, list[ModVersion]] = {}
+        for channel in VALID_RELEASE_TYPES:
+            channel_versions = await self.get_project_versions(
+                project_id,
+                game_versions=[minecraft_version],
+                loaders=loaders if loaders else None,
+                version_type=channel,
+            )
+            if channel_versions:
+                available_channels[channel] = channel_versions
+        return available_channels
+
+    async def check_mods_compatibility(
         self,
         mods: list[str],
         minecraft_version: str,
@@ -454,7 +526,7 @@ class ModrinthClient:
     ) -> CompatibilityResult:
         results: list[ModInfo] = []
         for mod in mods:
-            mod_info = self.check_mod_compatibility(mod, minecraft_version, loader)
+            mod_info = await self.check_mod_compatibility(mod, minecraft_version, loader)
             results.append(mod_info)
 
         return CompatibilityResult(

@@ -43,7 +43,17 @@ class Config:
         return cls(discord=discord, mods=mods)
 
     def get_mods_file_path(self) -> Path:
-        return Path(self.mods.file).expanduser().resolve()
+        base_dir = Path(__file__).parent.parent
+        mods_path = (base_dir / self.mods.file).expanduser().resolve()
+
+        mods_path = mods_path.resolve()
+        base_dir = base_dir.resolve()
+
+        if not str(mods_path).startswith(str(base_dir)):
+            msg = "Invalid mods file path: path traversal detected"
+            raise ValueError(msg)
+
+        return mods_path
 
     def load_mods_list(self) -> list[str]:
         mods_file = self.get_mods_file_path()
