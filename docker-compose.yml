@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   bot:
-    build: .
+    image: can-we-update-mc:deploy
     env_file:
       - .env
     volumes:

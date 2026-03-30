@@ -1,0 +1,50 @@
+#!/bin/bash
+set -e
+
+set -a
+source .env
+set +a
+
+REMOTE_HOST="${REMOTE_HOST:?REMOTE_HOST not set in .env}"
+REMOTE_USER="${REMOTE_USER:-root}"
+REMOTE_DIR="${REMOTE_DIR:-/opt/can-we-update-mc}"
+
+if [ ! -f .env ]; then
+    echo "Error: .env file not found"
+    exit 1
+fi
+
+echo "Building Docker image..."
+docker build -t can-we-update-mc:latest .
+
+echo "Tagging image..."
+docker tag can-we-update-mc:latest can-we-update-mc:deploy
+
+echo "Saving image to archive..."
+docker save can-we-update-mc:deploy -o /tmp/can-we-update-mc.tar
+
+echo "Creating remote directory..."
+ssh "$REMOTE_USER@$REMOTE_HOST" "mkdir -p $REMOTE_DIR"
+
+echo "Transferring files to $REMOTE_USER@$REMOTE_HOST..."
+scp docker-compose.yml .env config.toml mods.txt "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/"
+scp /tmp/can-we-update-mc.tar "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/"
+
+echo "Loading and restarting on remote..."
+ssh "$REMOTE_USER@$REMOTE_HOST" << EOF
+    cd $REMOTE_DIR
+    docker compose rm -f
+    docker load -i can-we-update-mc.tar
+    docker compose up -d
+    rm -f can-we-update-mc.tar
+EOF
+
+rm /tmp/can-we-update-mc.tar
+echo "Deployment complete!"
+
+echo ""
+read -p "Tail logs? [y/N] " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    ssh "$REMOTE_USER@$REMOTE_HOST" "cd $REMOTE_DIR && docker compose logs -f"
+fi

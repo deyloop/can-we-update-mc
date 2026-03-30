@@ -15,4 +15,4 @@ RUN pip install uv && \
 
 USER 1000
 
-CMD ["python", "-m", "bot.main"]
+CMD [".venv/bin/python", "-m", "bot.main"]
