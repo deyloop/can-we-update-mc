@@ -1,0 +1,15 @@
+# List of mods to check (same format as MODRINTH_PROJECTS in docker-minecraft-server)
+# Each line can be:
+#   - Project slug or ID: fabric-api
+#   - With loader prefix: fabric:sodium, forge:jei
+#   - Specific version: fabric-api:beta
+#   - Specific version ID or number: fabric-api:bQZpGIz0 or fabric-api:0.119.2+1.21.4
+
+# Core Fabric API (usually required)
+fabric-api
+
+# Performance mods
+sodium
+indium
+lithium
+magnesium

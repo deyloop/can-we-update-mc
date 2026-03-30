@@ -1,0 +1,7 @@
+[discord]
+token = ""  # Set via DISCORD_TOKEN env var or here
+guild_id = 0  # Optional: Set to enable guild-specific commands (faster sync)
+
+[mods]
+file = "mods.txt"
+loader = "fabric"  # Default: fabrc, forge, quilt, neoforge, paper

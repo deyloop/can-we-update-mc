@@ -1,6 +1,1 @@
-def main():
-    print("Hello from can-we-update-mc!")
-
-
-if __name__ == "__main__":
-    main()
+"""Run the bot from the project root with: python -m bot.main"""
