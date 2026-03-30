@@ -5,7 +5,6 @@ A Discord bot that checks if your mods are ready for a Minecraft version update.
 ## Features
 
 - Check if all your mods are compatible with a specific Minecraft version
-- Automatic daily checks at a configurable time
 - Rich Discord embed output with compatibility status per mod
 - Supports Fabric, Forge, Quilt, NeoForge, and Paper loaders
 
@@ -70,13 +69,6 @@ Edit `config.toml` to configure the bot:
 [discord]
 # Token is read from DISCORD_TOKEN env var or set here
 guild_id = 123456789  # Optional: for guild-specific commands
-
-[schedule]
-enabled = true
-timezone = "America/New_York"  # Your timezone
-hour = 9
-minute = 0
-channel_id = 987654321  # Channel to post daily results
 
 [mods]
 file = "mods.txt"
@@ -176,10 +168,6 @@ docker compose -f /opt/can-we-update-mc/docker-compose.yml down
 - `/check 1.21.5` - Check compatibility for Minecraft 1.21.5
 - `/check 1.20.4` - Check compatibility for Minecraft 1.20.4
 - `/checklatest` - Check against the latest Minecraft release
-
-## Scheduled Checks
-
-When enabled in `config.toml`, the bot will automatically check mod compatibility at the configured time each day and post results to the specified Discord channel.
 
 ## Mod List Format
 
