@@ -101,7 +101,7 @@ Supported formats per line:
 ## Running the Bot
 
 ```bash
-uv run python main.py
+uv run python -m bot.main
 ```
 
 ## Docker Deployment
