@@ -112,6 +112,57 @@ Supported formats per line:
 uv run python main.py
 ```
 
+## Docker Deployment
+
+### Prerequisites
+
+- Docker installed locally
+- SSH access to your remote server
+- The remote server must have Docker running
+
+### Configuration
+
+Ensure your `.env` file contains:
+
+```env
+DISCORD_TOKEN=your_bot_token_here
+
+# Remote deployment settings
+REMOTE_HOST=your-server.com
+REMOTE_USER=root
+REMOTE_DIR=/opt/can-we-update-mc
+```
+
+### Deploy
+
+Run the deploy script:
+
+```bash
+./deploy
+```
+
+This will:
+1. Build the Docker image locally
+2. Save it to a tar archive
+3. Transfer the image, `.env`, `config.toml`, and `mods.txt` to the remote server
+4. Load the image and start the container
+5. Prompt to tail logs
+
+### Remote Management
+
+SSH into your server and use docker compose:
+
+```bash
+# View logs
+docker compose -f /opt/can-we-update-mc/docker-compose.yml logs -f
+
+# Restart the bot
+docker compose -f /opt/can-we-update-mc/docker-compose.yml restart
+
+# Stop the bot
+docker compose -f /opt/can-we-update-mc/docker-compose.yml down
+```
+
 ## Discord Commands
 
 | Command | Description |
