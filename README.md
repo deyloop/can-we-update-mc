@@ -198,4 +198,4 @@ uv run pytest tests/
 
 ## License
 
-Apache License 2.0. See LICENCE
+Apache License 2.0. See LICENSE
