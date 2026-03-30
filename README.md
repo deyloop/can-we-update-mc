@@ -198,4 +198,4 @@ uv run pytest tests/
 
 ## License
 
-MIT
+Apache License 2.0. See LICENCE
